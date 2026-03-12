@@ -1,21 +1,35 @@
+"""
+motion_detector.py – Second Sentry
+===================================
+OpenCV-based motion detection via frame differencing.
+Optimized for Raspberry Pi (low-res grayscale pipeline) but fully
+runnable on Windows for development / testing.
+"""
+
 import cv2
 import numpy as np
 
 # ---------------------------------------------------------------------------
-# Tunable parameters
+# Adjustable parameters
 # ---------------------------------------------------------------------------
 
-# Minimum contour area (in pixels) to count as real motion.
-# Increase to ignore small movements (insects, noise); decrease to be more sensitive.
-MOTION_THRESHOLD: int = 500
+# Binary-threshold applied to the absolute frame difference.
+# Pixel changes below this value are ignored as noise.
+# Raise on noisy cameras; lower for higher sensitivity.
+MOTION_THRESHOLD: int = 25
 
-# Gaussian blur kernel size — smooths frames before differencing to reduce noise.
-# Must be an odd number.
-BLUR_KERNEL_SIZE: int = 21
+# Minimum contour area (pixels²) to count as real motion.
+# Increase to ignore insects / compression artefacts; decrease to catch
+# smaller movements.
+MIN_CONTOUR_AREA: int = 500
 
-# Binary threshold applied to the diff image.
-# Pixels brighter than this (after blur) are marked as changed.
-DIFF_THRESHOLD: int = 25
+# Gaussian blur kernel size – smooths frames before differencing.
+# Must be an odd number.  Larger = more noise suppression but less detail.
+_BLUR_KERNEL: tuple = (21, 21)
+
+# Dilation iterations – fills small gaps between motion regions so they
+# merge into a single contour.
+_DILATE_ITERATIONS: int = 2
 
 
 # ---------------------------------------------------------------------------
@@ -25,61 +39,69 @@ DIFF_THRESHOLD: int = 25
 def detect_motion(
     current_frame: np.ndarray,
     previous_frame: np.ndarray,
-    threshold: int = MOTION_THRESHOLD,
+    *,
+    motion_threshold: int = MOTION_THRESHOLD,
+    min_contour_area: int = MIN_CONTOUR_AREA,
 ) -> bool:
     """
-    Detect motion between two consecutive BGR frames using frame differencing.
+    Detect motion between two consecutive BGR frames.
 
-    Steps
-    -----
+    Pipeline
+    --------
     1. Convert both frames to grayscale.
-    2. Blur to suppress camera noise.
-    3. Compute absolute pixel difference.
-    4. Threshold the diff to produce a binary mask.
-    5. Find contours in the mask.
-    6. Return True if any contour exceeds *threshold* area.
+    2. Apply Gaussian blur to suppress sensor / compression noise.
+    3. Compute absolute pixel-level difference.
+    4. Threshold the diff image to produce a binary motion mask.
+    5. Dilate the mask to merge nearby regions.
+    6. Find external contours and check whether any exceeds
+       *min_contour_area*.
 
     Parameters
     ----------
-    current_frame : numpy.ndarray
+    current_frame : np.ndarray
         The latest captured BGR frame.
-    previous_frame : numpy.ndarray
+    previous_frame : np.ndarray
         The immediately preceding BGR frame.
-    threshold : int
-        Minimum contour area (pixels²) to be classified as motion.
-        Defaults to the module-level MOTION_THRESHOLD.
+    motion_threshold : int, optional
+        Pixel-difference threshold (0-255).  Defaults to module-level
+        ``MOTION_THRESHOLD``.
+    min_contour_area : int, optional
+        Smallest contour area (px²) that counts as motion.  Defaults to
+        module-level ``MIN_CONTOUR_AREA``.
 
     Returns
     -------
     bool
-        True if motion was detected, False otherwise.
+        ``True`` if motion is detected, ``False`` otherwise.
     """
     if current_frame is None or previous_frame is None:
         return False
 
-    # 1. Grayscale
-    gray_current  = cv2.cvtColor(current_frame,  cv2.COLOR_BGR2GRAY)
-    gray_previous = cv2.cvtColor(previous_frame, cv2.COLOR_BGR2GRAY)
+    # 1. Grayscale conversion
+    gray_curr = cv2.cvtColor(current_frame, cv2.COLOR_BGR2GRAY)
+    gray_prev = cv2.cvtColor(previous_frame, cv2.COLOR_BGR2GRAY)
 
-    # 2. Blur (reduce sensor / compression noise)
-    gray_current  = cv2.GaussianBlur(gray_current,  (BLUR_KERNEL_SIZE, BLUR_KERNEL_SIZE), 0)
-    gray_previous = cv2.GaussianBlur(gray_previous, (BLUR_KERNEL_SIZE, BLUR_KERNEL_SIZE), 0)
+    # 2. Gaussian blur (reduces high-frequency noise)
+    gray_curr = cv2.GaussianBlur(gray_curr, _BLUR_KERNEL, 0)
+    gray_prev = cv2.GaussianBlur(gray_prev, _BLUR_KERNEL, 0)
 
-    # 3. Absolute frame difference
-    diff = cv2.absdiff(gray_previous, gray_current)
+    # 3. Frame difference
+    diff = cv2.absdiff(gray_prev, gray_curr)
 
     # 4. Binary threshold → motion mask
-    _, mask = cv2.threshold(diff, DIFF_THRESHOLD, 255, cv2.THRESH_BINARY)
+    _, mask = cv2.threshold(diff, motion_threshold, 255, cv2.THRESH_BINARY)
 
-    # Dilate to fill small gaps between motion regions
-    mask = cv2.dilate(mask, None, iterations=2)
+    # 5. Dilate to close small gaps
+    mask = cv2.dilate(mask, None, iterations=_DILATE_ITERATIONS)
 
-    # 5. Find contours
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    # 6. Contour detection
+    contours, _ = cv2.findContours(
+        mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
 
-    # 6. Check if any contour is large enough to be real motion
+    # Return True as soon as any contour exceeds the minimum area
     for contour in contours:
-        if cv2.contourArea(contour) >= threshold:
+        if cv2.contourArea(contour) >= min_contour_area:
             return True
 
     return False
